@@ -11,6 +11,7 @@ for citation verification, so keep it accurate: only include a source here if
 its URL was genuinely returned by the API call.
 """
 
+import time
 import xml.etree.ElementTree as ET
 
 import requests
@@ -20,8 +21,21 @@ WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
 
 REQUEST_TIMEOUT_SECONDS = 15
 
+# arXiv's API silently hangs/throttles requests that don't send a descriptive
+# User-Agent (Python's default "python-requests/x.y" gets deprioritized).
+# Wikipedia's etiquette guidelines ask for the same. Set on both.
+_REQUEST_HEADERS = {"User-Agent": "research-assistant-agent/1.0 (portfolio project; contact via github)"}
+
 # Atom/arXiv XML namespaces
 _ATOM_NS = "{http://www.w3.org/2005/Atom}"
+
+# arXiv publishes a soft rate limit of roughly one request per 3 seconds and
+# returns HTTP 429 above that. A single user asking one question rarely hits
+# this, but the agent can legitimately fire a few arxiv calls in a row while
+# refining a query, so a short retry-with-backoff makes the tool resilient
+# to a transient 429 instead of surfacing it as a hard failure immediately.
+_ARXIV_MAX_RETRIES = 2
+_ARXIV_RETRY_BACKOFF_SECONDS = 3
 
 
 def search_arxiv(query: str, max_results: int = 5) -> dict:
@@ -40,11 +54,28 @@ def search_arxiv(query: str, max_results: int = 5) -> dict:
         "max_results": max_results,
     }
 
-    try:
-        response = requests.get(ARXIV_API_URL, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        return {"error": f"arXiv request failed: {exc}", "results": [], "sources": []}
+    response = None
+    for attempt in range(_ARXIV_MAX_RETRIES + 1):
+        is_last_attempt = attempt == _ARXIV_MAX_RETRIES
+        try:
+            response = requests.get(
+                ARXIV_API_URL, params=params, timeout=REQUEST_TIMEOUT_SECONDS, headers=_REQUEST_HEADERS
+            )
+            if response.status_code == 429 and not is_last_attempt:
+                time.sleep(_ARXIV_RETRY_BACKOFF_SECONDS * (attempt + 1))
+                continue
+            response.raise_for_status()
+            break  # success
+        except requests.RequestException as exc:
+            if is_last_attempt:
+                if response is not None and response.status_code == 429:
+                    return {
+                        "error": "arXiv is rate-limiting this client (HTTP 429) after retries. Try again shortly.",
+                        "results": [],
+                        "sources": [],
+                    }
+                return {"error": f"arXiv request failed: {exc}", "results": [], "sources": []}
+            time.sleep(_ARXIV_RETRY_BACKOFF_SECONDS * (attempt + 1))
 
     try:
         root = ET.fromstring(response.text)
@@ -112,7 +143,7 @@ def search_wikipedia(query: str) -> dict:
     try:
         search_response = requests.get(
             WIKIPEDIA_API_URL, params=search_params, timeout=REQUEST_TIMEOUT_SECONDS,
-            headers={"User-Agent": "research-assistant-agent/1.0"},
+            headers=_REQUEST_HEADERS,
         )
         search_response.raise_for_status()
         search_data = search_response.json()
@@ -145,7 +176,7 @@ def search_wikipedia(query: str) -> dict:
     try:
         extract_response = requests.get(
             WIKIPEDIA_API_URL, params=extract_params, timeout=REQUEST_TIMEOUT_SECONDS,
-            headers={"User-Agent": "research-assistant-agent/1.0"},
+            headers=_REQUEST_HEADERS,
         )
         extract_response.raise_for_status()
         extract_data = extract_response.json()

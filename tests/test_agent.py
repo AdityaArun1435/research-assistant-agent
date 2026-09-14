@@ -81,7 +81,8 @@ def test_search_arxiv_parses_entries():
 def test_search_arxiv_handles_request_failure():
     import requests
 
-    with patch("tools.requests.get", side_effect=requests.RequestException("boom")):
+    with patch("tools.requests.get", side_effect=requests.RequestException("boom")), \
+         patch("tools.time.sleep"):  # skip real backoff delays in tests
         result = search_arxiv("anything")
 
     assert result["error"] is not None

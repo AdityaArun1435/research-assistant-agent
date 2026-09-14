@@ -8,11 +8,13 @@ Run with: pytest
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agent import verify_citations
+import agent
+from agent import AgentError, MAX_TOOL_FAILURES, run_agent, verify_citations
 from tools import search_arxiv, search_wikipedia
 
 
@@ -132,3 +134,56 @@ def test_search_wikipedia_no_results():
     assert result["url"] == ""
     assert result["sources"] == []
     assert "note" in result
+
+
+# --- run_agent's tool-failure backstop -------------------------------------
+# In manual testing, the model sometimes ignored the system prompt's "stop
+# retrying a failing tool" instruction and kept calling it anyway. These
+# tests confirm the code-level backstop (MAX_TOOL_FAILURES) holds regardless
+# of what the model does, since a prompt instruction alone isn't a guarantee.
+
+def _tool_call_response(call_id, name="search_arxiv", arguments='{"query": "test"}'):
+    """Build a fake Groq response whose message requests one tool call."""
+    tool_call = SimpleNamespace(id=call_id, function=SimpleNamespace(name=name, arguments=arguments))
+    message = SimpleNamespace(content=None, tool_calls=[tool_call])
+    return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+
+class _AlwaysRequestsToolClient:
+    """Fake Groq client whose model never stops calling the tool, simulating
+    a model that doesn't follow the 'stop retrying' prompt instruction."""
+
+    def __init__(self):
+        self.call_count = 0
+
+    def _create(self, **_kwargs):
+        self.call_count += 1
+        return _tool_call_response(call_id=str(self.call_count))
+
+    @property
+    def chat(self):
+        return SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+
+def test_tool_failure_backstop_caps_real_invocations():
+    real_call_count = SimpleNamespace(n=0)
+
+    def always_failing_tool(**_kwargs):
+        real_call_count.n += 1
+        return {"error": "boom", "results": [], "sources": []}
+
+    fake_client = _AlwaysRequestsToolClient()
+
+    with patch.object(agent, "_get_client", return_value=fake_client), \
+         patch.dict(agent.TOOL_FUNCTIONS, {"search_arxiv": always_failing_tool}):
+        try:
+            run_agent("irrelevant question")
+            assert False, "expected AgentError since the fake model never stops calling tools"
+        except AgentError:
+            pass
+
+    # The real tool function is only ever invoked up to MAX_TOOL_FAILURES
+    # times, every call after that is short-circuited locally in agent.py.
+    assert real_call_count.n == MAX_TOOL_FAILURES
+    # But the model kept "requesting" the tool for the full iteration budget.
+    assert fake_client.call_count == agent.MAX_ITERATIONS

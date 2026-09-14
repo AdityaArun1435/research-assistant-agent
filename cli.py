@@ -11,6 +11,13 @@ from agent import AgentError, run_agent
 
 load_dotenv()
 
+# Windows' console defaults to a legacy codepage (cp1252) that can't print
+# characters models commonly use (curly quotes, en-dashes, etc.), causing a
+# UnicodeEncodeError on `print`. Force UTF-8 on stdout/stderr where supported.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
 
 def on_event(event):
     if event["type"] == "tool_call":

@@ -24,7 +24,21 @@ from groq import Groq
 from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS
 
 MODEL = "openai/gpt-oss-120b"
-MAX_ITERATIONS = 6
+# 6 tool-calling round trips is tight once a tool needs one retry on failure
+# (e.g. one Wikipedia call + up to two arXiv attempts already uses 3), so this
+# gives a little more headroom while still bounding runaway loops. Hitting
+# this cap always raises AgentError with a clear message, it never fails
+# silently or loops forever.
+MAX_ITERATIONS = 8
+
+# The system prompt asks the model to stop retrying a tool after one extra
+# attempt, but prompt instructions are a request, not a guarantee, models
+# (this one included, in testing) sometimes keep hammering a failing tool
+# anyway. This cap is enforced in code as the actual backstop: once a tool
+# has errored this many times in a conversation, further calls to it are
+# short-circuited locally (no network request) with a message telling the
+# model to stop, rather than trusting it to self-regulate.
+MAX_TOOL_FAILURES = 2
 
 SYSTEM_PROMPT = """You are a careful research assistant with access to two tools:
 - search_arxiv: searches academic papers on arXiv
@@ -45,8 +59,21 @@ Rules you must follow:
 4. Use search_arxiv for academic/technical/research questions and
    search_wikipedia for background, definitions, history, or general
    context. Use both when a question needs both. You may call tools more
-   than once, for example to refine a query that returned nothing useful.
-5. When you have enough information, write a final synthesized answer with
+   than once, for example to refine a query that returned nothing useful,
+   but never call the same tool again with a query that means essentially
+   the same thing as one you already successfully got a result for, reuse
+   that result instead. Your tool-call budget is limited, spend it on
+   genuinely new information, not repeats.
+5. If a tool call returns an error (not just "no results", an actual
+   error), retry that tool at most once more, ideally with a reworded
+   query. If it fails again, stop calling it, do not keep retrying the
+   same failing tool with new phrasings. Move on and answer using whatever
+   you did successfully retrieve, and say plainly in your final answer
+   which source was unavailable, for example "arXiv search was unavailable
+   during this query, so the answer below draws only on Wikipedia." A
+   partial answer with an honest caveat is always better than exhausting
+   your tool-call budget on a tool that is not responding.
+6. When you have enough information, write a final synthesized answer with
    inline citations. Do not call any more tools once you are ready to answer.
 """
 
@@ -97,6 +124,7 @@ def run_agent(question: str, on_event=None) -> dict:
 
     retrieved_sources = []  # every {"title", "url"} dict actually returned by a tool
     tool_call_log = []
+    tool_failure_counts = {}  # name -> consecutive-ish error count this conversation
 
     for iteration in range(1, MAX_ITERATIONS + 1):
         on_event({"type": "thinking", "iteration": iteration})
@@ -149,11 +177,26 @@ def run_agent(question: str, on_event=None) -> dict:
 
             on_event({"type": "tool_call", "name": name, "args": args})
 
-            func = TOOL_FUNCTIONS.get(name)
-            if func is None:
-                result = {"error": f"Unknown tool '{name}'"}
+            if tool_failure_counts.get(name, 0) >= MAX_TOOL_FAILURES:
+                # Backstop: this tool has already failed too many times.
+                # Don't hit the network again, tell the model to give up on it.
+                result = {
+                    "error": (
+                        f"{name} has failed {tool_failure_counts[name]} time(s) already "
+                        "this conversation and will not be retried. Stop calling this "
+                        "tool and answer with whatever information is already available, "
+                        "noting that this source was unavailable."
+                    )
+                }
             else:
-                result = func(**args)
+                func = TOOL_FUNCTIONS.get(name)
+                if func is None:
+                    result = {"error": f"Unknown tool '{name}'"}
+                else:
+                    result = func(**args)
+
+            if result.get("error"):
+                tool_failure_counts[name] = tool_failure_counts.get(name, 0) + 1
 
             tool_call_log.append({"name": name, "args": args, "result": result})
 

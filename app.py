@@ -18,6 +18,19 @@ from agent import AgentError, run_agent
 
 load_dotenv()
 
+# Local dev reads GROQ_API_KEY from .env via load_dotenv() above. Streamlit
+# Community Cloud instead injects secrets via st.secrets (set in the app's
+# dashboard, never committed), not as an environment variable. Bridge the
+# two here so agent.py can stay Streamlit-agnostic and just read os.environ.
+# st.secrets raises if no secrets.toml/dashboard secrets exist at all (the
+# normal case for local dev), so this is a no-op there.
+if not os.environ.get("GROQ_API_KEY"):
+    try:
+        if "GROQ_API_KEY" in st.secrets:
+            os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
+    except Exception:
+        pass
+
 LOGO_PATH = Path(__file__).parent / "assets" / "logo.png"
 
 st.set_page_config(page_title="Research Assistant Agent", page_icon=str(LOGO_PATH), layout="centered")

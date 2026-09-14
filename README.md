@@ -127,6 +127,30 @@ python -c "from groq import Groq; import os; from dotenv import load_dotenv; loa
    pytest
    ```
 
+## Deploying (Streamlit Community Cloud)
+
+The repo is public at
+[github.com/AdityaArun1435/research-assistant-agent](https://github.com/AdityaArun1435/research-assistant-agent),
+so it can be deployed for free on Streamlit Community Cloud without a
+separate build step:
+
+1. Go to [share.streamlit.io](https://share.streamlit.io) and sign in with
+   GitHub.
+2. Click **New app**, pick this repo, branch `master`, main file `app.py`.
+3. Before (or after) deploying, open **Settings -> Secrets** on the app and
+   paste in the contents of `.streamlit/secrets.toml.example` with your real
+   key:
+
+   ```toml
+   GROQ_API_KEY = "your_groq_api_key_here"
+   ```
+
+   `app.py` reads `GROQ_API_KEY` from the environment first (how local
+   `.env` works) and falls back to `st.secrets` (how Streamlit Cloud's
+   dashboard secrets work), so the same code runs in both places unchanged.
+4. Deploy. First boot installs `requirements.txt`, subsequent pushes to
+   `master` redeploy automatically.
+
 ## Example questions to try
 
 - "What does recent research say about retrieval-augmented generation, and

@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import agent
 from agent import AgentError, MAX_TOOL_FAILURES, run_agent, verify_citations
-from tools import search_arxiv, search_wikipedia
+from tools import search_arxiv, search_semantic_scholar, search_wikipedia
 
 
 # --- verify_citations -----------------------------------------------------
@@ -134,6 +134,70 @@ def test_search_wikipedia_no_results():
     assert result["url"] == ""
     assert result["sources"] == []
     assert "note" in result
+
+
+# --- search_semantic_scholar -----------------------------------------------
+
+def test_search_semantic_scholar_parses_results():
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.raise_for_status = Mock()
+    mock_response.json.return_value = {
+        "data": [
+            {
+                "title": "Deep Residual Learning for Image Recognition",
+                "authors": [{"name": "Kaiming He"}, {"name": "Xiangyu Zhang"}],
+                "abstract": "Deeper neural networks are more difficult to train...",
+                "year": 2016,
+                "venue": "CVPR",
+                "url": "https://www.semanticscholar.org/paper/abc123",
+            }
+        ]
+    }
+
+    with patch("tools.requests.get", return_value=mock_response):
+        result = search_semantic_scholar("resnet", max_results=1)
+
+    assert result["error"] is None
+    assert len(result["results"]) == 1
+    paper = result["results"][0]
+    assert paper["title"] == "Deep Residual Learning for Image Recognition"
+    assert paper["authors"] == ["Kaiming He", "Xiangyu Zhang"]
+    assert paper["year"] == 2016
+    assert result["sources"] == [
+        {"title": "Deep Residual Learning for Image Recognition", "url": "https://www.semanticscholar.org/paper/abc123"}
+    ]
+
+
+def test_search_semantic_scholar_handles_429():
+    mock_response = Mock()
+    mock_response.status_code = 429
+
+    with patch("tools.requests.get", return_value=mock_response):
+        result = search_semantic_scholar("anything")
+
+    assert result["error"] is not None
+    assert "rate-limiting" in result["error"]
+    assert result["results"] == []
+    assert result["sources"] == []
+
+
+def test_search_semantic_scholar_skips_papers_without_url():
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.raise_for_status = Mock()
+    mock_response.json.return_value = {
+        "data": [
+            {"title": "No URL Paper", "authors": [], "url": ""},
+            {"title": "Has URL Paper", "authors": [], "url": "https://example.com/paper"},
+        ]
+    }
+
+    with patch("tools.requests.get", return_value=mock_response):
+        result = search_semantic_scholar("anything")
+
+    assert len(result["results"]) == 1
+    assert result["results"][0]["title"] == "Has URL Paper"
 
 
 # --- run_agent's tool-failure backstop -------------------------------------

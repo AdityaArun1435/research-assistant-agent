@@ -24,12 +24,12 @@ from groq import Groq
 from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS
 
 MODEL = "openai/gpt-oss-120b"
-# 6 tool-calling round trips is tight once a tool needs one retry on failure
-# (e.g. one Wikipedia call + up to two arXiv attempts already uses 3), so this
-# gives a little more headroom while still bounding runaway loops. Hitting
-# this cap always raises AgentError with a clear message, it never fails
-# silently or loops forever.
-MAX_ITERATIONS = 8
+# With three tools available, a thorough answer can reasonably involve one
+# Wikipedia call plus arXiv and Semantic Scholar (each possibly needing one
+# retry on failure), so this gives enough headroom for that while still
+# bounding runaway loops. Hitting this cap always raises AgentError with a
+# clear message, it never fails silently or loops forever.
+MAX_ITERATIONS = 10
 
 # The system prompt asks the model to stop retrying a tool after one extra
 # attempt, but prompt instructions are a request, not a guarantee, models
@@ -40,8 +40,10 @@ MAX_ITERATIONS = 8
 # model to stop, rather than trusting it to self-regulate.
 MAX_TOOL_FAILURES = 2
 
-SYSTEM_PROMPT = """You are a careful research assistant with access to two tools:
-- search_arxiv: searches academic papers on arXiv
+SYSTEM_PROMPT = """You are a careful research assistant with access to three tools:
+- search_arxiv: searches preprints on arXiv, strong for recent/cutting-edge research
+- search_semantic_scholar: searches published/peer-reviewed papers across all fields,
+  broader than arXiv, use it to cross-check a claim or for fields arXiv covers thinly
 - search_wikipedia: fetches background/context from Wikipedia
 
 Rules you must follow:
@@ -60,14 +62,16 @@ Rules you must follow:
 3. If the tool results do not adequately answer the question, say so
    explicitly, for example "The retrieved sources do not cover X" rather
    than filling the gap from memory.
-4. Use search_arxiv for academic/technical/research questions and
-   search_wikipedia for background, definitions, history, or general
-   context. Use both when a question needs both. You may call tools more
-   than once, for example to refine a query that returned nothing useful,
-   but never call the same tool again with a query that means essentially
-   the same thing as one you already successfully got a result for, reuse
-   that result instead. Your tool-call budget is limited, spend it on
-   genuinely new information, not repeats.
+4. Use search_arxiv and/or search_semantic_scholar for academic/technical/
+   research questions (both if you want preprint plus peer-reviewed
+   coverage, or to cross-check a claim), and search_wikipedia for
+   background, definitions, history, or general context. Use whichever
+   combination the question actually needs. You may call a tool more than
+   once, for example to refine a query that returned nothing useful, but
+   never call the same tool again with a query that means essentially the
+   same thing as one you already successfully got a result for, reuse that
+   result instead. Your tool-call budget is limited, spend it on genuinely
+   new information, not repeats.
 5. If a tool call returns an error (not just "no results", an actual
    error), retry that tool at most once more, ideally with a reworded
    query. If it fails again, stop calling it, do not keep retrying the

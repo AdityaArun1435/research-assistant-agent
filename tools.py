@@ -3,7 +3,7 @@ Tool implementations for the research assistant agent.
 
 Each tool is a plain Python function that takes simple arguments and returns
 a JSON-serializable dict. Nothing here knows about Groq, the agent loop, or
-Streamlit, this module only talks to arXiv and Wikipedia.
+Streamlit, this module only talks to arXiv, Wikipedia, and Semantic Scholar.
 
 Every tool also returns a "sources" list of {"title": ..., "url": ...} pairs.
 The agent loop uses that list to build the set of "actually retrieved" URLs
@@ -18,6 +18,7 @@ import requests
 
 ARXIV_API_URL = "http://export.arxiv.org/api/query"
 WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
+SEMANTIC_SCHOLAR_API_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
 
 REQUEST_TIMEOUT_SECONDS = 15
 
@@ -206,6 +207,80 @@ def search_wikipedia(query: str) -> dict:
     }
 
 
+def search_semantic_scholar(query: str, max_results: int = 5) -> dict:
+    """
+    Search Semantic Scholar for papers matching `query`. Broader than arXiv,
+    it indexes published/peer-reviewed literature across all fields (not
+    just preprints) and includes citation counts, useful as a second,
+    independent check on academic claims.
+
+    No API key is required for this endpoint, but the unauthenticated tier
+    is modestly rate-limited, so, like search_arxiv, a 429 here is a
+    "slow down" signal rather than a real failure.
+
+    Returns a dict with a "results" list, each entry holding title, authors,
+    abstract, year, venue, and URL, plus a "sources" list for citation
+    verification.
+    """
+    max_results = max(1, min(int(max_results), 10))
+
+    params = {
+        "query": query,
+        "limit": max_results,
+        "fields": "title,authors,abstract,year,venue,url",
+    }
+
+    try:
+        response = requests.get(
+            SEMANTIC_SCHOLAR_API_URL, params=params, timeout=REQUEST_TIMEOUT_SECONDS, headers=_REQUEST_HEADERS
+        )
+        if response.status_code == 429:
+            return {
+                "error": "Semantic Scholar is rate-limiting this client (HTTP 429). Try again shortly.",
+                "results": [],
+                "sources": [],
+            }
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        return {"error": f"Semantic Scholar request failed: {exc}", "results": [], "sources": []}
+
+    papers = data.get("data", []) or []
+
+    results = []
+    sources = []
+
+    for paper in papers:
+        url = paper.get("url", "")
+        if not url:
+            continue  # a result we can't cite is not useful to this agent
+
+        title = paper.get("title") or "Untitled"
+        authors = [a.get("name", "") for a in (paper.get("authors") or []) if a.get("name")]
+
+        results.append(
+            {
+                "title": title,
+                "authors": authors,
+                "abstract": paper.get("abstract") or "",
+                "year": paper.get("year"),
+                "venue": paper.get("venue") or "",
+                "url": url,
+            }
+        )
+        sources.append({"title": title, "url": url})
+
+    if not results:
+        return {
+            "error": None,
+            "results": [],
+            "sources": [],
+            "note": "No Semantic Scholar results found for this query.",
+        }
+
+    return {"error": None, "results": results, "sources": sources}
+
+
 # --- Tool registry -----------------------------------------------------
 # This is the single source of truth mapping a tool name to its Python
 # callable and its OpenAI-style JSON schema. agent.py imports TOOL_SCHEMAS
@@ -217,9 +292,9 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "search_arxiv",
             "description": (
-                "Search arXiv for academic papers on a topic. Use this for research "
-                "literature, technical methods, experimental results, or anything "
-                "that would show up as a preprint or academic paper."
+                "Search arXiv for preprints on a topic, most useful for recent/cutting-edge "
+                "research (especially CS, physics, math, stats) that may not be peer-reviewed "
+                "or indexed elsewhere yet."
             ),
             "parameters": {
                 "type": "object",
@@ -258,9 +333,37 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_semantic_scholar",
+            "description": (
+                "Search Semantic Scholar for published/peer-reviewed academic papers across "
+                "all fields, broader than arXiv (not limited to preprints) and includes "
+                "citation counts. Use this to cross-check a claim against peer-reviewed "
+                "literature, or for fields arXiv doesn't cover well (e.g. medicine, biology, "
+                "social science)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query, e.g. 'CRISPR off-target effects'.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Number of papers to return (1-10). Defaults to 5.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 TOOL_FUNCTIONS = {
     "search_arxiv": search_arxiv,
     "search_wikipedia": search_wikipedia,
+    "search_semantic_scholar": search_semantic_scholar,
 }
